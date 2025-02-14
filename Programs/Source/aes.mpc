@@ -73,7 +73,6 @@ def ApplyBDEmbedding(x):
 
     return sum(powers2[idx] * out_bytes[idx] for idx in range(8))
 
-
 def PreprocInverseEmbedding(x):
     in_bytes = x.bit_decompose_embedding()
 
@@ -137,7 +136,7 @@ def expandAESKey(cipherKey, Nr = 10, Nb = 4, Nk = 4):
 
     #Nr = 10 -> The number of rounds in AES Cipher.
     #Nb = 4 -> The number of columns of the AES state
-    #Nk = 4 -> The number of words of a AES key 
+    #Nk = 4 -> The number of words of a AES key
 
 def SecretArrayEmbedd(byte_array):
     return [ApplyEmbedding(_) for _ in byte_array]
@@ -146,6 +145,11 @@ def SecretArrayEmbedd(byte_array):
 def subBytes(state):
     for i in range(len(state)):
         state[i] = box.apply_sbox(state[i])
+
+@vectorize
+def subBytesInv(state):
+    for i in range(len(state)):
+        state[i] = box.inverse_sbox(state[i])
 
 def addRoundKey(roundKey):
     @vectorize
@@ -178,12 +182,42 @@ def mixColumn(column):
     column[3] = (temp[0] + doubles[0]) + temp[1] + temp[2] + doubles[3]
 
 @vectorize
+def mixColumnInv(column):
+    temp = copy(column)
+
+    v9  = ApplyEmbedding(cgf2n(9))
+    v11 = ApplyEmbedding(cgf2n(11))
+    v13 = ApplyEmbedding(cgf2n(13))
+    v14 = ApplyEmbedding(cgf2n(14))
+
+    column[0] = temp[0] * v14 + temp[1] * v11 + temp[2] * v13 + temp[3] * v9
+    column[1] = temp[0] * v9 + temp[1] * v14 + temp[2] * v11 + temp[3] * v13
+    column[2] = temp[0] * v13 + temp[1] * v9 + temp[2] * v14 + temp[3] * v11
+    column[3] = temp[0] * v11 + temp[1] * v13 + temp[2] * v9 + temp[3] * v14
+
+@vectorize
 def mixColumns(state):
     for i in range(4):
         column = []
         for j in range(4):
             column.append(state[i*4+j])
         mixColumn(column)
+        for j in range(4):
+            state[i*4+j] = column[j]
+
+# mixColumnsInv is a wrapper for mixColumnInv - generates a "virtual" column from
+# the state table and applies the weird galois math
+@vectorize
+def mixColumnsInv(state):
+    for i in range(4):
+        column = []
+        # create the column by taking the same item out of each "virtual" row
+        for j in range(4):
+            column.append(state[i*4+j])
+
+        # apply mixColumn on our virtual column
+        mixColumnInv(column)
+        # transfer the new values back into the state table
         for j in range(4):
             state[i*4+j] = column[j]
 
@@ -194,10 +228,24 @@ def shiftRows(state):
     for i in range(4):
         state[i::4] = rotate(state[i::4],i)
 
+def shiftRowsInv(state):
+    for i in range(4):
+        state[i::4] = rotate(state[i::4],-i)
+
 @vectorize
 def state_collapse(state):
     return [InverseEmbedding(_) for _ in state]
 
+combined_powers = [
+ [1, 2, 4, 8, 16, 32, 64, 128],
+ [1, 4, 16, 64, 27, 108, 171, 154],
+ [1, 16, 27, 171, 94, 151, 179, 197],
+ [1, 27, 94, 179, 228, 148, 232, 32],
+ [1, 94, 228, 232, 77, 145, 29, 108],
+ [1, 228, 77, 29, 250, 128, 74, 151],
+ [1, 77, 250, 74, 2, 154, 239, 148],
+ [1, 250, 2, 239, 4, 197, 8, 145]
+]
 
 # such constants. very wow.
 _embedded_powers = [
@@ -258,7 +306,7 @@ for idx in range(8):
 
 class SpdzBox(object):
     def init_matrices(self):
-        self.matrix_inv = [ 
+        self.matrix_inv = [
             [0,0,1,0,0,1,0,1],
             [1,0,0,1,0,0,1,0],
             [0,1,0,0,1,0,0,1],
@@ -321,6 +369,34 @@ class SpdzBox(object):
         #applying with the multiplicative chain
         return self.forward_bit_sbox(what)
 
+    def inverse_sbox(self, what):
+        what_inv_bd = InverseBDEmbedding(what)
+        linear_transform = list()
+
+        for row in self.matrix_inv:
+            result = cgf2n(0,size=nparallel)
+            for idx in range(len(row)):
+                result = result + what_inv_bd[idx] * row[idx]
+            linear_transform.append(result)
+
+        #do the sum(linear_transfor + additive_layer)
+        summation_bd = [0 for _ in range(8)]
+        for idx in range(8):
+            summation_bd[idx] = linear_transform[idx] + self.addition_inv[idx]
+
+        #Now raise this to power of 254
+        inverse = inverseMod(ApplyBDEmbedding(summation_bd))
+        return inverse
+
+# class PrepSpdzBox(object):
+#     @vectorize
+#     def apply_sbox(self, what):
+#         masks = sgf2n.load_mem(mask_array.address, size=nparallel)
+#         masked_bits = (what + masks).reveal().bit_decompose(step=5)
+#         masked = cgf2n.bit_compose(embed_helper(masked_bits))
+#         #masked = sum(b << i for i,b in enumerate(embed_helper(masked_bits)))
+#         return sgf2n.load_mem(lut.address + regint(masked), size=nparallel)
+
 box = SpdzBox()
 
 def aesRound(roundKey):
@@ -330,6 +406,15 @@ def aesRound(roundKey):
         shiftRows(state)
         mixColumns(state)
         addRoundKey(roundKey)(state)
+    return inner
+
+def aesRoundInv(roundKey):
+    @vectorize
+    def inner(state):
+        addRoundKey(roundKey)(state)
+        mixColumnsInv(state)
+        shiftRowsInv(state)
+        subBytesInv(state)
     return inner
 
 # returns a 16-byte round key based on an expanded key and round number
@@ -349,9 +434,26 @@ def aesMain(expandedKey, numRounds=10):
 
         roundKey = createRoundKey(expandedKey, numRounds)
 
-        subBytes(state) 
+        subBytes(state)
         shiftRows(state)
         addRoundKey(roundKey)(state)
+    return inner
+
+def aesMainInv(expandedKey, numRounds=10):
+    @vectorize
+    def inner(state):
+        roundKey = createRoundKey(expandedKey, numRounds)
+        addRoundKey(roundKey)(state)
+        shiftRowsInv(state)
+        subBytesInv(state)
+
+        for i in range(numRounds - 1, 0, -1):
+            roundKey = createRoundKey(expandedKey, i)
+            aesRoundInv(roundKey)(state)
+
+        roundKey = createRoundKey(expandedKey, 0)
+        addRoundKey(roundKey)(state)
+
     return inner
 
 def encrypt_without_key_schedule(expandedKey):
@@ -362,17 +464,26 @@ def encrypt_without_key_schedule(expandedKey):
         return state_collapse(plaintext)
     return encrypt;
 
+def decrypt_without_key_schedule(expandedKey):
+    @vectorize
+    def decrypt(ciphertext):
+        ciphertext = SecretArrayEmbedd(ciphertext)
+        aesMainInv(expandedKey)(ciphertext)
+        return state_collapse(ciphertext)
+
+    return decrypt
+
 """
 Test Vectors:
 
 plaintext:
 6bc1bee22e409f96e93d7e117393172a
 
-key: 
+key:
 2b7e151628aed2a6abf7158809cf4f3c
 
 resulting cipher
-3ad77bb40d7a3660a89ecaf32466ef97 
+3ad77bb40d7a3660a89ecaf32466ef97
 
 """
 
@@ -386,6 +497,11 @@ def single_encryption():
     key = [sgf2n(x) for x in conv(test_key)]
     message = [sgf2n(x) for x in conv(test_message)]
 
+    print_str('Plaintext message: ')
+    for block in message:
+        print_str('%s', block.reveal())
+    print_ln()
+
     key = [ApplyEmbedding(_) for _ in key]
     expanded_key = expandAESKey(key)
 
@@ -393,7 +509,33 @@ def single_encryption():
 
     ciphertext = AES(message)
 
+    print_str('CTXT: ')
     for block in ciphertext:
-        print_ln('%s', block.reveal())
+        print_str('%s', block.reveal())
+    print_ln()
+
+    expected_ctxt = [sgf2n(x) for x in conv("3ad77bb40d7a3660a89ecaf32466ef97")]
+    print_str('Expectged CTXT: ')
+    for block in expected_ctxt:
+        print_str('%s', block.reveal())
+    print_ln()
+
+def single_decryption():
+    key = [sgf2n(x) for x in conv(test_key)]
+    ciphertext = [sgf2n(x) for x in conv("3ad77bb40d7a3660a89ecaf32466ef97")]  # Example from test vectors
+
+    key = [ApplyEmbedding(_) for _ in key]
+    expanded_key = expandAESKey(key)
+
+    AES_decrypt = decrypt_without_key_schedule(expanded_key)
+    plaintext = AES_decrypt(ciphertext)
+
+    print_ln()
+    print_str('Recovered PTXT: ')
+    for block in plaintext:
+        print_str('%s', block.reveal())
+    print_ln()
+
 
 single_encryption()
+single_decryption()
