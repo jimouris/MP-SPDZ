@@ -15,3 +15,14 @@ mv gf2n_vals.out Player-Data/Private-Input-0
 
 ./Scripts/compile-run.py -E mascot aes
 ```
+
+
+With separate preprocessing:
+```shell
+make mascot-offline.x
+./mascot-offline.x -p 0 & ./mascot-offline.x -p 1
+```
+And run the online phase as:
+```shell
+Scripts/mascot.sh -F -N 2 aes
+```

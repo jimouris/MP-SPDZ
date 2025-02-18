@@ -1,5 +1,7 @@
 from copy import copy
 
+from Compiler.types import sgf2n
+
 rcon_raw = [
         0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a,
         0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a, 0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39,
@@ -388,15 +390,6 @@ class SpdzBox(object):
         inverse = inverseMod(ApplyBDEmbedding(summation_bd))
         return inverse
 
-# class PrepSpdzBox(object):
-#     @vectorize
-#     def apply_sbox(self, what):
-#         masks = sgf2n.load_mem(mask_array.address, size=nparallel)
-#         masked_bits = (what + masks).reveal().bit_decompose(step=5)
-#         masked = cgf2n.bit_compose(embed_helper(masked_bits))
-#         #masked = sum(b << i for i,b in enumerate(embed_helper(masked_bits)))
-#         return sgf2n.load_mem(lut.address + regint(masked), size=nparallel)
-
 box = SpdzBox()
 
 def aesRound(roundKey):
@@ -462,7 +455,7 @@ def encrypt_without_key_schedule(expandedKey):
         plaintext = SecretArrayEmbedd(plaintext)
         aesMain(expandedKey)(plaintext)
         return state_collapse(plaintext)
-    return encrypt;
+    return encrypt
 
 def decrypt_without_key_schedule(expandedKey):
     @vectorize
@@ -473,69 +466,148 @@ def decrypt_without_key_schedule(expandedKey):
 
     return decrypt
 
-"""
-Test Vectors:
+@vectorize
+def set_counter(cnt, int_value):
+    # Determine how many bytes are needed to represent int_value
+    num_bytes = (int_value.bit_length() + 7) // 8
+    # Convert int_value to bytes, preserving only the necessary least significant bytes
+    byte_list = [(int_value >> (8 * i)) & 0xFF for i in range(num_bytes)][::-1]
+    # Update only the least significant bytes in cnt
+    for i in range(num_bytes):
+        cnt[-(i + 1)] = sgf2n(byte_list[-(i + 1)])
+    return cnt
 
-plaintext:
-6bc1bee22e409f96e93d7e117393172a
+def xor_block(x, y):
+    return [xi ^ yi for xi, yi in zip(x, y)]
 
-key:
-2b7e151628aed2a6abf7158809cf4f3c
+# AES CTR Encryption function
+def aes_ctr_encrypt(plaintext, expanded_key, iv):
+    AES = encrypt_without_key_schedule(expanded_key)
 
-resulting cipher
-3ad77bb40d7a3660a89ecaf32466ef97
+    ciphertext = []
+    cnt = 1
+    counter = iv + [sgf2n(x) for x in conv("00000001")]
+    for i in range(0, len(plaintext), 16):
+        cnt += 1
+        counter = set_counter(counter, cnt)
+        keystream = AES(counter)
+        block = plaintext[i:i + 16]
+        encrypted_block = xor_block(block, keystream)
+        ciphertext.extend(encrypted_block)
+    return ciphertext
 
-"""
-
-test_message = "6bc1bee22e409f96e93d7e117393172a"
-test_key = "2b7e151628aed2a6abf7158809cf4f3c"
+def aes_ctr_decrypt(ciphertext, expanded_key, iv):
+    return aes_ctr_encrypt(ciphertext, expanded_key, iv)
 
 def conv(x):
     return [int(x[i : i + 2], 16) for i in range(0, len(x), 2)]
 
-def single_encryption():
-    key = [sgf2n(x) for x in conv(test_key)]
-    message = [sgf2n(x) for x in conv(test_message)]
+# AES ECB Test Vectors:
+ecb_test_ptxt = "6bc1bee22e409f96e93d7e117393172a"
+ecb_test_key  = "2b7e151628aed2a6abf7158809cf4f3c"
+ecb_test_ctxt = "3ad77bb40d7a3660a89ecaf32466ef97"
 
-    print_str('Plaintext message: ')
-    for block in message:
-        print_str('%s', block.reveal())
-    print_ln()
+# AES CTR Test Vectors:
+ctr_test_1_ptxt = "00000000000000000000000000000000"
+ctr_test_1_key  = "00000000000000000000000000000000"
+ctr_test_1_iv   = "000000000000000000000000"
+ctr_test_1_ctxt = "0388dace60b6a392f328c2b971b2fe78"
 
-    key = [ApplyEmbedding(_) for _ in key]
-    expanded_key = expandAESKey(key)
+ctr_test_2_ptxt = "d9313225f88406e5a55909c5aff5269a" \
+                "86a7a9531534f7da2e4c303d8a318a72" \
+                "1c3c0c95956809532fcf0e2449a6b525" \
+                "b16aedf5aa0de657ba637b391aafd255"
+ctr_test_2_key  = "feffe9928665731c6d6a8f9467308308"
+ctr_test_2_iv   = "cafebabefacedbaddecaf888"
+ctr_test_2_ctxt = "42831ec2217774244b7221b784d0d49c" \
+                "e3aa212f2c02a4e035c17e2329aca12e" \
+                "21d514b25466931c7d8f6a5aac84aa05" \
+                "1ba30b396a0aac973d58e091473f5985"
 
-    AES = encrypt_without_key_schedule(expanded_key)
-
-    ciphertext = AES(message)
-
-    print_str('CTXT: ')
-    for block in ciphertext:
-        print_str('%s', block.reveal())
-    print_ln()
-
-    expected_ctxt = [sgf2n(x) for x in conv("3ad77bb40d7a3660a89ecaf32466ef97")]
-    print_str('Expectged CTXT: ')
-    for block in expected_ctxt:
-        print_str('%s', block.reveal())
-    print_ln()
-
-def single_decryption():
-    key = [sgf2n(x) for x in conv(test_key)]
-    ciphertext = [sgf2n(x) for x in conv("3ad77bb40d7a3660a89ecaf32466ef97")]  # Example from test vectors
+def ecb_main():
+    key = [sgf2n(x) for x in conv(ecb_test_key)]
+    plaintext = [sgf2n(x) for x in conv(ecb_test_ptxt)]
 
     key = [ApplyEmbedding(_) for _ in key]
     expanded_key = expandAESKey(key)
-
+    AES_encrypt = encrypt_without_key_schedule(expanded_key)
     AES_decrypt = decrypt_without_key_schedule(expanded_key)
-    plaintext = AES_decrypt(ciphertext)
 
-    print_ln()
-    print_str('Recovered PTXT: ')
+    print_str('Plaintext:  ')
     for block in plaintext:
         print_str('%s', block.reveal())
     print_ln()
 
+    ciphertext = AES_encrypt(plaintext)
+    print_str('Ciphertext: ')
+    for block in ciphertext:
+        print_str('%s', block.reveal())
+    print_ln()
 
-single_encryption()
-single_decryption()
+    plaintext = AES_decrypt(ciphertext)
+    print_str('Recovered:  ')
+    for block in plaintext:
+        print_str('%s', block.reveal())
+    print_ln()
+
+def ctr_main():
+    key = [sgf2n(x) for x in conv(ctr_test_1_key)]
+    plaintext = [sgf2n(x) for x in conv(ctr_test_1_ptxt)]
+    iv = [sgf2n(x) for x in conv(ctr_test_1_iv)]
+
+    # key = [sgf2n(x) for x in conv(ctr_test_2_key)]
+    # plaintext = [sgf2n(x) for x in conv(ctr_test_2_ptxt)]
+    # iv = [sgf2n(x) for x in conv(ctr_test_2_iv)]
+
+    key = [ApplyEmbedding(_) for _ in key]
+    expanded_key = expandAESKey(key)
+
+    print_str('Plaintext:  ')
+    for block in plaintext:
+        print_str('%s', block.reveal())
+    print_ln()
+
+    ciphertext = aes_ctr_encrypt(plaintext, expanded_key, iv)
+    print_str('Ciphertext: ')
+    for block in ciphertext:
+        print_str('%s', block.reveal())
+    print_ln()
+
+    plaintext = aes_ctr_decrypt(ciphertext, expanded_key, iv)
+    print_str('Recovered:  ')
+    for block in plaintext:
+        print_str('%s', block.reveal())
+    print_ln()
+
+def ctr_decrypt_to_shares_main():
+    key = [sgf2n(x) for x in conv(ctr_test_1_key)]
+    plaintext = [sgf2n(x) for x in conv(ctr_test_1_ptxt)]
+    iv = [sgf2n(x) for x in conv(ctr_test_1_iv)]
+
+    # key = [sgf2n(x) for x in conv(ctr_test_2_key)]
+    # plaintext = [sgf2n(x) for x in conv(ctr_test_2_ptxt)]
+    # iv = [sgf2n(x) for x in conv(ctr_test_2_iv)]
+
+    key = [ApplyEmbedding(_) for _ in key]
+    expanded_key = expandAESKey(key)
+
+    ciphertext = [sgf2n(x) for x in conv(ctr_test_1_ctxt)]
+
+    plaintext = aes_ctr_decrypt(ciphertext, expanded_key, iv)
+    print_str('Recovered:  ')
+    for block in plaintext:
+        print_str('%s', block.reveal())
+    print_ln()
+
+    # mask0 = sgf2n.get_random_input_mask_for(0)
+    # mask1 = sgf2n.get_random_input_mask_for(1)
+    # new = block[0] + mask0[0] + mask1[0]
+    # print_ln("new: %s", new.reveal())
+    # print_ln("mask0: %s", mask0[0].reveal())
+    # print_ln("mask1: %s", mask1[0].reveal())
+    # mask0[1].binary_output()
+    # mask1[1].binary_output()
+
+# ecb_main()
+# ctr_main()
+ctr_decrypt_to_shares_main()
